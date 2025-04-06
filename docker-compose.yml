@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./poll-frontend
+      # If using build-time env vars for API URL:
+      # args:
+      #   REACT_APP_API_URL: http://localhost:5000/api
+    ports:
+      - "3000:80" # Map host port 3000 to container port 80 (Nginx)
+    depends_on:
+      - api
+    # No env vars needed here if using relative '/api' path and relying on proxy
+    # Or if proxying via Nginx within the container (less common for local dev)
+
+  api:
+    build: ./poll-api
+    ports:
+      - "5000:5000" # Map host port 5000 to container port 5000 (Gunicorn)
+    environment:
+      # Use environment variables for configuration
+      # Match these with the postgres service below
+      DB_HOST: db # Service name defined below
+      DB_PORT: 5432
+      DB_NAME: poll_db
+      DB_USER: poll_user
+      DB_PASSWORD: poll_secret_password # Use a more secure way in real projects (e.g., .env file, secrets)
+      FLASK_ENV: development # Override Dockerfile's production setting for local dev if needed
+      FLASK_DEBUG: 1 # Enable Flask debug mode for local dev
+    depends_on:
+      - db
+    volumes:
+       # Mount local code for hot-reloading (only for development!)
+      - ./poll-api:/app
+
+  db:
+    image: postgres:15-alpine # Use official PostgreSQL image
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB} # Use variable
+      POSTGRES_USER: ${POSTGRES_USER} # Use variable
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # Use variable
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist data using a named volume
+      - ./poll-db/init.sql:/docker-entrypoint-initdb.d/init.sql # Run init script on first start
+    ports:
+      - "5432:5432" # Expose PostgreSQL port to host (optional, for debugging)
+
+volumes:
+  postgres_data: # Define the named volume for persistence

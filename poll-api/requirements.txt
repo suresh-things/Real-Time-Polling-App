@@ -1,0 +1,5 @@
+Flask>=2.0
+psycopg2-binary>=2.9
+gunicorn>=20.0
+Flask-Cors>=3.0
+python-dotenv>=0.19 # Useful for local dev, not strictly needed in container if env vars are set
