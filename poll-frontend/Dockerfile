@@ -1,26 +1,21 @@
 # Stage 1: Build the React application
 FROM node:18-alpine AS builder
-
+# ... (rest of builder stage remains the same) ...
 WORKDIR /app
-
-# Copy package.json and package-lock.json (or yarn.lock)
 COPY package*.json ./
-
-# Install dependencies
-# Use ci for reproducible builds if using package-lock.json
 RUN npm ci
-
-# Copy the rest of the application source code
 COPY . .
-
-# Build the application for production
-# Ensure API URL is configured here if using build-time env vars
-# ARG REACT_APP_API_URL=/api
-# ENV REACT_APP_API_URL=$REACT_APP_API_URL
 RUN npm run build
 
 # Stage 2: Serve the static files using Nginx
 FROM nginx:stable-alpine
+
+# --- Add OS Package Update ---
+# Update package lists, upgrade installed packages, and clean up cache
+RUN apk update && \
+    apk upgrade --no-cache && \
+    rm -rf /var/cache/apk/*
+# --- End OS Package Update ---
 
 # Copy the custom Nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
@@ -35,5 +30,4 @@ COPY --from=builder /app/build /usr/share/nginx/html
 EXPOSE 80
 
 # Start Nginx when the container launches
-# 'daemon off;' keeps Nginx running in the foreground, essential for Docker
 CMD ["nginx", "-g", "daemon off;"]

@@ -1,12 +1,15 @@
 # .github/workflows/ci.yaml
 
-name: Secure Build, Scan, and Push to ACR
+name: Secure Multi-Env CI (Build, Scan, Push)
 
 on:
   push:
-    branches: [ main ] # Start with main, add other branches later if needed (e.g., develop, staging)
+    branches:
+      - main
+      - staging # Trigger on staging branch
+      - develop # Trigger on develop branch
   pull_request:
-    branches: [ main ] # Also run scans on PRs to main
+    branches: [ main, staging, develop ] # Scan PRs targeting these branches
 
 env:
   # ACR Secrets (Ensure these are set in GitHub Repo Settings > Secrets)
@@ -15,7 +18,7 @@ env:
 
 jobs:
   # ===========================================
-  # Linting Job
+  # Linting Job (Runs for all triggers)
   # ===========================================
   lint:
     name: Code Linting
@@ -23,56 +26,47 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18' # Or your project's required Node version
-
       - name: Install Frontend Dependencies & Lint
         working-directory: ./poll-frontend # Verify this path matches your project structure
         run: |
-          npm ci # Use ci for faster, deterministic installs based on package-lock.json
+          npm ci
           npm run lint # Assumes 'lint' script is defined in poll-frontend/package.json
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9' # Or your project's required Python version
-
       - name: Install Backend Dependencies & Lint
         working-directory: ./poll-api # Verify this path matches your project structure
         run: |
           pip install flake8 # Consider adding to a requirements-dev.txt instead
-          # Example flake8 command - customize rules as needed
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-          # Add other linters (e.g., black, isort) if configured
 
   # ===========================================
-  # Security Scanning Job (Secrets, SCA, SAST)
+  # Security Scanning Job (Runs for all triggers)
   # ===========================================
   security:
     name: Security Scanning (Secrets, SCA, SAST)
     runs-on: ubuntu-latest
     needs: [lint] # Ensures linting passes before scanning
+    env: # Job-level env for Sonar check
+      SONAR_ENABLED: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Required for SonarCloud PR analysis & Gitleaks history scanning
-
       - name: Detect Secrets with Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Optional: allows interaction with GitHub API if needed by action features
-          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE}} # Only required if using a Pro license
-        # By default, this action will fail the job if secrets are detected
-
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18' # Match linting job
-
+          node-version: '18'
       - name: Run Snyk Scan (Frontend Dependencies - SCA)
         uses: snyk/actions/node@master
         continue-on-error: true # START HERE: Review results before enforcing failure. Remove later.
@@ -81,12 +75,10 @@ jobs:
         with:
           command: monitor # Use 'monitor' to track in Snyk UI, or 'test' to fail based on threshold
           args: --file=poll-frontend/package-lock.json --severity-threshold=high --org=suresh-things # Replace placeholder & adjust threshold
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9' # Match linting job
-
+          python-version: '3.9'
       - name: Run Snyk Scan (Backend Dependencies - SCA)
         uses: snyk/actions/python@master
         continue-on-error: true # START HERE: Review results before enforcing failure. Remove later.
@@ -94,93 +86,105 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} # Required
         with:
           command: monitor
-          args: --file=poll-api/requirements.txt --severity-threshold=high --org=<your-snyk-org-name> # Replace placeholder & adjust threshold
-
-      # --- SAST with SonarCloud (Optional: requires SonarCloud setup & secrets) ---
-      - name: Set up JDK 17 for SonarScanner
-        if: success() && secrets.SONAR_TOKEN != '' # Run only if Sonar secrets are configured
+          args: --file=poll-api/requirements.txt --severity-threshold=high --org=suresh-things # Replace placeholder & adjust threshold
+      # --- SAST with SonarCloud (Optional) ---
+      - name: Set up JDK 17
+        if: success() && env.SONAR_ENABLED == 'true'
         uses: actions/setup-java@v3
         with:
-          java-version: '17' # SonarScanner runs on JVM
-          distribution: 'temurin' # Recommended distribution
-
+          java-version: '17'
+          distribution: 'temurin'
       - name: Cache SonarCloud packages
-        if: success() && secrets.SONAR_TOKEN != ''
+        if: success() && env.SONAR_ENABLED == 'true'
         uses: actions/cache@v3
         with:
           path: ~/.sonar/cache
           key: ${{ runner.os }}-sonar
           restore-keys: ${{ runner.os }}-sonar
-
       - name: SonarCloud Scan (SAST)
-        if: success() && secrets.SONAR_TOKEN != ''
+        if: success() && env.SONAR_ENABLED == 'true'
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to decorate PRs with analysis results
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}    # Required: Store in GitHub Secrets for authentication
-        # No 'with:' block is needed if relying on automatic analysis or a sonar-project.properties file
-        # If needed, provide args like this:
-        # with:
-        #   args: >
-        #     -Dsonar.organization=${{ secrets.SONAR_ORG_KEY }} # Required if not auto-detected
-        #     -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }} # Required if not auto-detected
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ secrets.SONAR_ORG_KEY }}
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
 
   # ===========================================
   # Build, Scan Image, Push Job (Frontend)
   # ===========================================
   build-scan-push-frontend:
-    name: Build, Scan, and Push Frontend
+    name: Build, Scan, Push Frontend
     runs-on: ubuntu-latest
-    needs: [security] # Run only after security scans pass (or continue-on-error allows)
-    # Conditional Execution: Only run this job on direct push events to the 'main' branch
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [security] # Run only after security scans pass
+    # Conditional Execution: Only run push step on direct pushes to deployment branches
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop')
+    # NO 'outputs' needed anymore
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Derive Image Tag from Branch
+        id: derive-tag # Still need ID for use within this job
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG=""
+          if [[ "$BRANCH_NAME" == "develop" ]]; then TAG="dev-${SHA_SHORT}";
+          elif [[ "$BRANCH_NAME" == "staging" ]]; then TAG="staging-${SHA_SHORT}";
+          elif [[ "$BRANCH_NAME" == "main" ]]; then TAG="${SHA_SHORT}";
+          else TAG="branch-${BRANCH_NAME}-${SHA_SHORT}"; fi
+          echo "Using tag: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.AZURE_CLIENT_ID }} # Assumes SPN Client ID stored as secret
-          password: ${{ secrets.AZURE_CLIENT_SECRET }} # Assumes SPN Client Secret stored as secret
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Set up Docker Buildx
-        # Enables more advanced build features like caching
         uses: docker/setup-buildx-action@v3
 
       - name: Build frontend image (no push yet)
-        id: docker_build_frontend # Give the step an ID to reference the image later
+        id: docker_build_frontend
         uses: docker/build-push-action@v5
         with:
-          context: ./poll-frontend # Path to the directory containing the Dockerfile
-          push: false # Crucial: Do not push the image yet
-          load: true # Load the built image into the local Docker daemon for scanning
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ github.sha }} # Unique tag for this build based on commit SHA
-          cache-from: type=gha # Attempt to load cache from previous runs
-          cache-to: type=gha,mode=max # Save cache for future runs
+          context: ./poll-frontend
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ steps.derive-tag.outputs.tag }} # Use derived tag
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Scan Frontend image with Trivy
         id: scan-frontend
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ github.sha }}' # Reference the specific tag built
-          format: 'table' # Output format in logs (options: table, json, template)
-          exit-code: '1' # Fail the workflow step if vulnerabilities are found (exit code 1)
-          ignore-unfixed: true # Don't fail on vulnerabilities that don't have a fix available yet
-          vuln-type: 'os,library' # Scan for vulnerabilities in OS packages and application libraries
-          severity: 'HIGH,CRITICAL' # Specify severities to fail on (e.g., MEDIUM,HIGH,CRITICAL)
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ steps.derive-tag.outputs.tag }}' # Scan derived tag
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
 
       - name: Push Frontend Image to ACR
-        # This step runs only if the previous steps in this job (build and scan) succeeded
-        if: success()
+        if: success() # Only push if build and scan succeeded
         run: |
-          echo "Pushing frontend image tagged with SHA and latest..."
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ github.sha }}
-          # Also tag this SHA commit as 'latest' for the main branch
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:latest
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend:latest
+          TAG="${{ steps.derive-tag.outputs.tag }}"
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/frontend"
+          echo "Pushing frontend image ${IMAGE_REF}:${TAG}"
+          docker push "${IMAGE_REF}:${TAG}"
+          # If main branch, also push 'latest' tag
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "Tagging and pushing frontend:latest for main branch"
+            docker tag "${IMAGE_REF}:${TAG}" "${IMAGE_REF}:latest"
+            docker push "${IMAGE_REF}:latest"
+          fi
 
   # ===========================================
   # Build, Scan Image, Push Job (API)
@@ -189,12 +193,25 @@ jobs:
     name: Build, Scan, and Push API
     runs-on: ubuntu-latest
     needs: [security] # Run only after security scans pass
-    # Conditional Execution: Only run this job on direct push events to the 'main' branch
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop')
+    # NO 'outputs' needed anymore
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Derive Image Tag from Branch
+        id: derive-tag # Still need ID for use within this job
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG=""
+          if [[ "$BRANCH_NAME" == "develop" ]]; then TAG="dev-${SHA_SHORT}";
+          elif [[ "$BRANCH_NAME" == "staging" ]]; then TAG="staging-${SHA_SHORT}";
+          elif [[ "$BRANCH_NAME" == "main" ]]; then TAG="${SHA_SHORT}";
+          else TAG="branch-${BRANCH_NAME}-${SHA_SHORT}"; fi
+          echo "Using tag: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
@@ -210,10 +227,10 @@ jobs:
         id: docker_build_api
         uses: docker/build-push-action@v5
         with:
-          context: ./poll-api # Path to the API Dockerfile context
+          context: ./poll-api
           push: false
           load: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ github.sha }} # Unique tag based on commit SHA
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ steps.derive-tag.outputs.tag }} # Use derived tag
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -221,19 +238,23 @@ jobs:
         id: scan-api
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ github.sha }}' # Scan the specific tag
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ steps.derive-tag.outputs.tag }}' # Scan derived tag
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
-          severity: 'HIGH,CRITICAL' # Fail only on High and Critical vulnerabilities
+          severity: 'HIGH,CRITICAL'
 
       - name: Push API Image to ACR
-        # This step runs only if the previous steps (build and scan) succeeded
-        if: success()
+        if: success() # Only push if build and scan succeeded
         run: |
-          echo "Pushing API image tagged with SHA and latest..."
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ github.sha }}
-          # Also tag this SHA commit as 'latest' for the main branch
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:latest
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api:latest
+          TAG="${{ steps.derive-tag.outputs.tag }}"
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/api"
+          echo "Pushing API image ${IMAGE_REF}:${TAG}"
+          docker push "${IMAGE_REF}:${TAG}"
+          # If main branch, also push 'latest' tag
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "Tagging and pushing api:latest for main branch"
+            docker tag "${IMAGE_REF}:${TAG}" "${IMAGE_REF}:latest"
+            docker push "${IMAGE_REF}:latest"
+          fi
